@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VELVET BAY — a neon-noir open-world crime game</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #14101e; font-family: 'Segoe UI', Arial, sans-serif; color: #f2f2f2; }
+  #game { display: block; width: 100vw; height: 100vh; }
+  .hidden { display: none !important; }
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  .panel { background: rgba(12, 8, 22, 0.72); border: 1px solid rgba(255, 46, 136, 0.35); border-radius: 10px; padding: 10px 14px; }
+  #hud-topleft { position: absolute; top: 14px; left: 14px; }
+  #stars { font-size: 26px; letter-spacing: 3px; line-height: 1; }
+  #health-bar { width: 190px; height: 12px; background: #222; border-radius: 6px; overflow: hidden; margin-top: 8px; }
+  #health-fill { height: 100%; width: 100%; background: #2ecc71; }
+  #cash { font-size: 22px; font-weight: 700; color: #7dff9a; margin-top: 6px; }
+  #style { font-size: 14px; font-weight: 700; color: #ff2e88; margin-top: 2px; letter-spacing: 1px; }
+  #hud-topcenter { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); text-align: center; max-width: 520px; }
+  #mission-name { font-size: 15px; font-weight: 700; color: #22d3ee; letter-spacing: 1px; text-transform: uppercase; }
+  #objective { font-size: 17px; margin-top: 3px; }
+  #hud-topright { position: absolute; top: 14px; right: 14px; text-align: right; }
+  #minimap { width: 168px; height: 168px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.25); background: #14101e; }
+  #clock { font-size: 20px; font-weight: 700; margin-top: 6px; }
+  #hud-bottomleft { position: absolute; bottom: 14px; left: 14px; font-size: 15px; }
+  #speed { font-size: 30px; font-weight: 800; }
+  #ammo { font-size: 15px; color: #ffd23f; margin-top: 2px; }
+  #perf { position: absolute; bottom: 14px; right: 64px; font-size: 12px; color: #7dff9a; background: rgba(8,12,18,0.6); padding: 4px 8px; border-radius: 6px; font-family: monospace; }
+  #hint { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); font-size: 13px; color: #cfd6dd; background: rgba(12,8,22,0.6); padding: 6px 12px; border-radius: 8px; }
+  #waypoint { position: absolute; top: 50%; left: 50%; font-size: 20px; font-weight: 800; color: #ff2e88; text-shadow: 0 0 8px #000; }
+  #waypoint-dist { position: absolute; top: 54%; left: 50%; transform: translateX(-50%); font-size: 15px; font-weight: 700; color: #ff2e88; text-shadow: 0 0 6px #000; }
+  #crosshair { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 22px; color: rgba(255,255,255,0.85); text-shadow: 0 0 4px #000; }
+  #banner { position: absolute; top: 22%; left: 50%; transform: translateX(-50%); text-align: center; }
+  #banner-title { font-size: 40px; font-weight: 800; color: #ff2e88; text-shadow: 0 2px 12px #000; }
+  #banner-sub { font-size: 18px; margin-top: 4px; }
+  #intro { position: absolute; top: 30%; left: 50%; transform: translateX(-50%); text-align: center; background: rgba(12,8,22,0.8); border: 1px solid #22d3ee; border-radius: 12px; padding: 18px 28px; }
+  #intro-title { font-size: 34px; font-weight: 800; color: #22d3ee; }
+  #intro-brief { font-size: 17px; margin-top: 6px; color: #e8e8e8; }
+  .screen { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; background: linear-gradient(160deg, rgba(20,10,32,0.88), rgba(60,10,60,0.82)); }
+  .screen-card { text-align: center; max-width: 640px; padding: 36px; }
+  .screen-card h1 { font-size: 64px; letter-spacing: 4px; color: #ff2e88; text-shadow: 0 0 24px rgba(255,46,136,0.6); }
+  .screen-card h1 span { color: #22d3ee; }
+  .screen-card h2 { font-size: 34px; color: #22d3ee; margin-bottom: 10px; }
+  .screen-card p { font-size: 17px; line-height: 1.55; color: #dfe6ec; margin: 10px 0; }
+  .screen-card .controls { font-size: 15px; color: #aeb9c2; }
+  .screen-card button { pointer-events: auto; font-size: 19px; font-weight: 700; padding: 13px 34px; margin: 8px 6px 0; border: none; border-radius: 10px; background: #ff2e88; color: #fff; cursor: pointer; }
+  .screen-card button.secondary { background: #33475e; }
+  .screen-card button:hover { filter: brightness(1.15); }
+  #btn-mute { position: fixed; bottom: 14px; right: 14px; z-index: 6; pointer-events: auto; font-size: 14px; padding: 8px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.25); background: rgba(12,8,22,0.75); color: #fff; cursor: pointer; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.min.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud" class="hidden">
+  <div id="hud-topleft" class="panel">
+    <div id="stars">☆☆☆☆☆</div>
+    <div id="health-bar"><div id="health-fill"></div></div>
+    <div id="cash">$0</div>
+    <div id="style">STYLE x1.0</div>
+  </div>
+  <div id="hud-topcenter" class="panel">
+    <div id="mission-name">Hot Wheels</div>
+    <div id="objective">Steal a car — walk up to one and press E</div>
+  </div>
+  <div id="hud-topright">
+    <canvas id="minimap" width="168" height="168"></canvas>
+    <div id="clock">17:40</div>
+  </div>
+  <div id="hud-bottomleft">
+    <div id="speed"></div>
+    <div id="ammo">Ammo 12 / 12</div>
+  </div>
+  <div id="perf" class="hidden"></div>
+  <div id="hint"></div>
+  <div id="waypoint">▲</div>
+  <div id="waypoint-dist"></div>
+  <div id="crosshair">+</div>
+  <div id="banner" class="hidden">
+    <div id="banner-title"></div>
+    <div id="banner-sub"></div>
+  </div>
+  <div id="intro" class="hidden">
+    <div id="intro-title"></div>
+    <div id="intro-brief"></div>
+  </div>
+</div>
+
+<div id="screen-title" class="screen">
+  <div class="screen-card">
+    <h1>VELVET <span>BAY</span></h1>
+    <p>Velvet Bay. Neon, sea air, and one last job. Rae Vega tried to go straight —
+    the city had other plans. Steal cars, drift the boulevard, outrun the PD, run
+    the package, and pull the Velvet Job.</p>
+    <p class="controls">WASD move &amp; drive · Shift sprint · Space jump / handbrake drift · E enter &amp; steal cars ·
+    F punch · Click to shoot · R reload · F3 perf overlay · Esc pause</p>
+    <p id="title-best"></p>
+    <button id="btn-start">Start the job</button>
+  </div>
+</div>
+
+<div id="screen-pause" class="screen hidden">
+  <div class="screen-card">
+    <h2>Paused</h2>
+    <p id="pause-best"></p>
+    <button id="btn-resume">Resume</button>
+    <button id="btn-restart" class="secondary">Restart story</button>
+  </div>
+</div>
+
+<div id="screen-busted" class="screen hidden">
+  <div class="screen-card">
+    <h2>BUSTED</h2>
+    <p id="busted-reason"></p>
+    <p>The PD impounded your ride. Rae walks out of the precinct and starts over.</p>
+    <button id="btn-busted">Get back out there</button>
+    <button id="btn-busted-restart" class="secondary">Restart story</button>
+  </div>
+</div>
+
+<div id="screen-story" class="screen hidden">
+  <div class="screen-card">
+    <h2>STORY COMPLETE</h2>
+    <p>The Velvet Job is done. Rae is free — the bay, the cars and the heat are yours now.</p>
+    <p id="story-cash"></p>
+    <button id="btn-story">Keep playing — free roam</button>
+  </div>
+</div>
+
+<button id="btn-mute">Mute</button>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
