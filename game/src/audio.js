@@ -2,21 +2,19 @@
 // files, no network. Engine hum follows speed, the siren wails while the
 // player is wanted, and a slow minor-key pad loops underneath: Velvet Bay
 // at dusk, all neon and low notes.
+//
+// Shape of the code: the three continuous voices (engine, siren, pad)
+// are rows in VOICES — each row names its oscillators, gains and wiring,
+// built by one generic builder. One-shots (gunshot, pickup, jingles)
+// go through two tiny helpers, tone() and noise(), instead of a
+// half-dozen near-identical blocks.
 export class AudioSys {
   constructor() {
     this.ctx = null;
     this.master = null;
-    this.engineOsc = null;
-    this.engineGain = null;
-    this.sirenOsc = null;
-    this.sirenGain = null;
-    this.sirenLfo = null;
-    this.padOscA = null;
-    this.padOscB = null;
-    this.padOscC = null;
-    this.padGain = null;
     this.muted = false;
     this.started = false;
+    this.voices = {};
   }
 
   ensure() {
@@ -30,89 +28,87 @@ export class AudioSys {
     this.master = this.ctx.createGain();
     this.master.gain.value = 0.5;
     this.master.connect(this.ctx.destination);
-    this._buildEngine();
-    this._buildSiren();
-    this._buildPad();
+    this.voices.engine = this._voice({
+      oscs: [{ type: 'sawtooth', freq: 55 }],
+      chain: [{ kind: 'lowpass', freq: 420 }],
+      out: 0,
+    });
+    this.voices.siren = this._voice({
+      oscs: [{ type: 'sine', freq: 780 }],
+      chain: [],
+      out: 0,
+      lfo: { type: 'square', freq: 0.7, depth: 220, target: 'freq' },
+    });
+    this.voices.pad = this._voice({
+      oscs: [
+        { type: 'triangle', freq: 110 },
+        { type: 'triangle', freq: 130.81 },
+        { type: 'sine', freq: 164.81 },
+      ],
+      chain: [],
+      out: 0.03,
+      lfo: { type: 'sine', freq: 0.08, depth: 0.012, target: 'gain' },
+    });
     this.started = true;
   }
 
-  _buildEngine() {
-    this.engineOsc = this.ctx.createOscillator();
-    this.engineOsc.type = 'sawtooth';
-    this.engineOsc.frequency.value = 55;
-    const low = this.ctx.createBiquadFilter();
-    low.type = 'lowpass';
-    low.frequency.value = 420;
-    this.engineGain = this.ctx.createGain();
-    this.engineGain.gain.value = 0;
-    this.engineOsc.connect(low);
-    low.connect(this.engineGain);
-    this.engineGain.connect(this.master);
-    this.engineOsc.start();
+  // Build one continuous voice: oscillators -> optional filter chain ->
+  // a gain node -> master. An LFO row wobbles one destination.
+  // Returns { oscs, gain } so the caller can steer it later.
+  _voice(spec) {
+    const oscs = spec.oscs.map((o) => {
+      const osc = this.ctx.createOscillator();
+      osc.type = o.type;
+      osc.frequency.value = o.freq;
+      return osc;
+    });
+    let head = oscs[0];
+    let tail = oscs[0];
+    for (const node of spec.chain) {
+      const f = this.ctx.createBiquadFilter();
+      f.type = node.kind;
+      f.frequency.value = node.freq;
+      tail.connect(f);
+      tail = f;
+    }
+    const gain = this.ctx.createGain();
+    gain.gain.value = spec.out;
+    tail.connect(gain);
+    gain.connect(this.master);
+    for (let i = 1; i < oscs.length; i++) oscs[i].connect(gain);
+    if (spec.lfo) {
+      const lfo = this.ctx.createOscillator();
+      lfo.type = spec.lfo.type;
+      lfo.frequency.value = spec.lfo.freq;
+      const depth = this.ctx.createGain();
+      depth.gain.value = spec.lfo.depth;
+      lfo.connect(depth);
+      if (spec.lfo.target === 'freq') depth.connect(oscs[0].frequency);
+      else depth.connect(gain.gain);
+      lfo.start();
+    }
+    for (const osc of oscs) osc.start();
+    return { oscs, gain };
   }
 
-  _buildSiren() {
-    this.sirenOsc = this.ctx.createOscillator();
-    this.sirenOsc.type = 'sine';
-    this.sirenOsc.frequency.value = 780;
-    this.sirenLfo = this.ctx.createOscillator();
-    this.sirenLfo.type = 'square';
-    this.sirenLfo.frequency.value = 0.7;
-    const lfoGain = this.ctx.createGain();
-    lfoGain.gain.value = 220;
-    this.sirenLfo.connect(lfoGain);
-    lfoGain.connect(this.sirenOsc.frequency);
-    this.sirenGain = this.ctx.createGain();
-    this.sirenGain.gain.value = 0;
-    this.sirenOsc.connect(this.sirenGain);
-    this.sirenGain.connect(this.master);
-    this.sirenOsc.start();
-    this.sirenLfo.start();
-  }
-
-  _buildPad() {
-    // A minor, three voices, slow breathing gain: the dusk pad.
-    this.padOscA = this.ctx.createOscillator();
-    this.padOscA.type = 'triangle';
-    this.padOscA.frequency.value = 110;
-    this.padOscB = this.ctx.createOscillator();
-    this.padOscB.type = 'triangle';
-    this.padOscB.frequency.value = 130.81;
-    this.padOscC = this.ctx.createOscillator();
-    this.padOscC.type = 'sine';
-    this.padOscC.frequency.value = 164.81;
-    this.padGain = this.ctx.createGain();
-    this.padGain.gain.value = 0.03;
-    const slow = this.ctx.createOscillator();
-    slow.type = 'sine';
-    slow.frequency.value = 0.08;
-    const slowGain = this.ctx.createGain();
-    slowGain.gain.value = 0.012;
-    slow.connect(slowGain);
-    slowGain.connect(this.padGain.gain);
-    this.padOscA.connect(this.padGain);
-    this.padOscB.connect(this.padGain);
-    this.padOscC.connect(this.padGain);
-    this.padGain.connect(this.master);
-    this.padOscA.start();
-    this.padOscB.start();
-    this.padOscC.start();
-    slow.start();
+  _setGain(voice, value, tau) {
+    if (!this.ctx || !this.voices[voice]) return;
+    this.voices[voice].gain.gain.setTargetAtTime(value, this.ctx.currentTime, tau);
   }
 
   setEngine(speed01, inCar) {
     if (!this.ctx) return;
     const target = inCar ? 0.05 + speed01 * 0.11 : 0;
-    this.engineGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.1);
-    this.engineOsc.frequency.setTargetAtTime(55 + speed01 * 130, this.ctx.currentTime, 0.08);
+    this._setGain('engine', target, 0.1);
+    this.voices.engine.oscs[0].frequency.setTargetAtTime(55 + speed01 * 130, this.ctx.currentTime, 0.08);
   }
 
   setSiren(on) {
-    if (!this.ctx) return;
-    this.sirenGain.gain.setTargetAtTime(on ? 0.045 : 0, this.ctx.currentTime, 0.2);
+    this._setGain('siren', on ? 0.045 : 0, 0.2);
   }
 
-  _blip(freq, dur, type, vol, slideTo) {
+  // One short pitched blip, optionally sliding down to slideTo.
+  _tone(freq, dur, type, vol, slideTo) {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
     const o = this.ctx.createOscillator();
@@ -128,6 +124,7 @@ export class AudioSys {
     o.stop(t + dur + 0.02);
   }
 
+  // One burst of filtered noise, fading out over its own length.
   _noise(dur, vol, filterFreq) {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
@@ -150,7 +147,7 @@ export class AudioSys {
 
   gunshot() {
     this._noise(0.16, 0.5, 1800);
-    this._blip(160, 0.1, 'square', 0.2, 60);
+    this._tone(160, 0.1, 'square', 0.2, 60);
   }
 
   punch() {
@@ -158,17 +155,20 @@ export class AudioSys {
   }
 
   pickup() {
-    this._blip(660, 0.12, 'sine', 0.3, 990);
+    this._tone(660, 0.12, 'sine', 0.3, 990);
   }
 
   missionDone() {
-    this._blip(523, 0.14, 'triangle', 0.35);
-    setTimeout(() => this._blip(659, 0.14, 'triangle', 0.35), 130);
-    setTimeout(() => this._blip(784, 0.3, 'triangle', 0.35), 260);
+    // C — E — G arpeggio, one note per step.
+    const notes = [523, 659, 784];
+    const steps = [0, 130, 260];
+    notes.forEach((freq, i) => {
+      setTimeout(() => this._tone(freq, i === 2 ? 0.3 : 0.14, 'triangle', 0.35), steps[i]);
+    });
   }
 
   busted() {
-    this._blip(220, 0.5, 'sawtooth', 0.25, 110);
+    this._tone(220, 0.5, 'sawtooth', 0.25, 110);
   }
 
   crash() {

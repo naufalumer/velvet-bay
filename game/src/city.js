@@ -11,6 +11,11 @@
 // lamp bulbs): the whole static city is a few dozen draw calls, and the
 // frame budget goes to the game instead of the draw-call list. Buildings
 // stay individual (only ~100) and share their window textures.
+//
+// Shape of the code: buildCity owns one shared context — rng, group,
+// colliders, a scratch Object3D — and hands it to one small builder per
+// city section (sky, stars, ground, dashes, towers, flora, beach), so
+// each section can be read and tuned without scrolling past the others.
 import * as THREE from 'three';
 import { CFG, PALETTE } from './config.js';
 import { mulberry32, range, pick, pickInt } from './rng.js';
@@ -19,53 +24,66 @@ function lambert(color) {
   return new THREE.MeshLambertMaterial({ color });
 }
 
-function windowTexture(baseColor, litRatio, rng) {
+function canvasTexture(w, h, draw) {
   const c = document.createElement('canvas');
-  c.width = 128;
-  c.height = 256;
-  const g = c.getContext('2d');
-  g.fillStyle = '#' + baseColor.toString(16).padStart(6, '0');
-  g.fillRect(0, 0, 128, 256);
-  const cols = 6;
-  const rows = 12;
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const lit = rng() < litRatio;
-      g.fillStyle = lit ? '#ffd98a' : '#20242e';
-      g.fillRect(8 + x * 20, 10 + y * 20, 12, 12);
-    }
-  }
+  c.width = w;
+  c.height = h;
+  draw(c.getContext('2d'));
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
 
-function neonSignTexture(text, color, rng) {
-  const c = document.createElement('canvas');
-  c.width = 256;
-  c.height = 64;
-  const g = c.getContext('2d');
-  g.clearRect(0, 0, 256, 64);
-  g.font = 'bold 40px Arial, sans-serif';
-  g.textAlign = 'center';
-  g.textBaseline = 'middle';
-  g.shadowColor = color;
-  g.shadowBlur = 18;
-  g.fillStyle = color;
-  g.fillText(text, 128, 34);
-  g.shadowBlur = 4;
-  g.fillStyle = '#ffffff';
-  g.fillText(text, 128, 34);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+function litWindowsTexture(baseColor, litRatio, rng) {
+  return canvasTexture(128, 256, (g) => {
+    g.fillStyle = '#' + baseColor.toString(16).padStart(6, '0');
+    g.fillRect(0, 0, 128, 256);
+    for (let y = 0; y < 12; y++) {
+      for (let x = 0; x < 6; x++) {
+        g.fillStyle = rng() < litRatio ? '#ffd98a' : '#20242e';
+        g.fillRect(8 + x * 20, 10 + y * 20, 12, 12);
+      }
+    }
+  });
+}
+
+function neonWordTexture(word, color) {
+  return canvasTexture(256, 64, (g) => {
+    g.clearRect(0, 0, 256, 64);
+    g.font = 'bold 40px Arial, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.shadowColor = color;
+    g.shadowBlur = 18;
+    g.fillStyle = color;
+    g.fillText(word, 128, 34);
+    g.shadowBlur = 4;
+    g.fillStyle = '#ffffff';
+    g.fillText(word, 128, 34);
+  });
 }
 
 const NEON_WORDS = ['VELVET', 'NEON', 'BAY 24H', 'HOTEL', 'BAR', 'TACOS', 'DISCO', 'MOTEL'];
 
+function flat(geo, mat, x, y, z) {
+  const m = new THREE.Mesh(geo, mat);
+  m.rotation.x = -Math.PI / 2;
+  m.position.set(x, y, z);
+  return m;
+}
+
+// Bake a list of matrices into one InstancedMesh and add it to the group.
+function bakeInstanced(ctx, geo, mat, matrices) {
+  const mesh = new THREE.InstancedMesh(geo, mat, matrices.length);
+  matrices.forEach((m, i) => mesh.setMatrixAt(i, m));
+  mesh.instanceMatrix.needsUpdate = true;
+  ctx.group.add(mesh);
+  return mesh;
+}
+
+// Push a circle (x/z) out of every axis-aligned box it overlaps.
+// Returns the push vector applied, or null when nothing overlapped.
 export function collideCircle(pos, radius, colliders) {
-  // Push a circle (x/z) out of every axis-aligned box it overlaps.
-  // Returns the push vector applied, or null when nothing overlapped.
   let pushed = null;
   for (let i = 0; i < colliders.length; i++) {
     const b = colliders[i];
@@ -102,124 +120,112 @@ export function collideCircle(pos, radius, colliders) {
   return pushed;
 }
 
-export function buildCity(scene, seed) {
-  const rng = mulberry32(seed);
-  const group = new THREE.Group();
-  const colliders = [];
-  const roadXs = [];
-  const roadZs = [];
-  for (let i = -CFG.gridHalf; i <= CFG.gridHalf; i++) {
-    roadXs.push(i * CFG.pitch);
-    roadZs.push(i * CFG.pitch);
-  }
-
-  // Sky, sun, fog. No shadow maps: the sun is a plain directional light,
-  // which keeps the frame time flat on weak GPUs.
+function addSky(ctx) {
+  const { scene } = ctx;
   scene.background = new THREE.Color(CFG.skyDusk);
   scene.fog = new THREE.Fog(CFG.skyDusk, 260, 700);
   const hemi = new THREE.HemisphereLight(0x8a7fd0, 0x3a2a3a, 0.85);
   scene.add(hemi);
+  // No shadow maps: the sun is a plain directional light, which keeps
+  // the frame time flat on weak GPUs.
   const sun = new THREE.DirectionalLight(CFG.sunDusk, 1.6);
   sun.position.set(120, 180, 60);
+  const target = new THREE.Object3D();
+  target.position.set(0, 0, 0);
+  scene.add(target);
+  sun.target = target;
   scene.add(sun);
-  const sunTarget = new THREE.Object3D();
-  sunTarget.position.set(0, 0, 0);
-  scene.add(sunTarget);
-  sun.target = sunTarget;
+  ctx.sun = sun;
+  ctx.hemi = hemi;
+}
 
+function addStars(ctx) {
   // Stars come out as dusk deepens (main.js fades them in).
-  const starGeo = new THREE.BufferGeometry();
-  const starPos = new Float32Array(220 * 3);
-  const starRng = mulberry32(seed + 31);
-  for (let i = 0; i < 220; i++) {
-    const a = starRng() * Math.PI * 2;
-    const r = 500 + starRng() * 400;
-    const y = 120 + starRng() * 320;
-    starPos[i * 3] = Math.cos(a) * r;
-    starPos[i * 3 + 1] = y;
-    starPos[i * 3 + 2] = Math.sin(a) * r;
+  const count = 220;
+  const positions = new Float32Array(count * 3);
+  const rng = mulberry32(ctx.seed + 31);
+  for (let i = 0; i < count; i++) {
+    const a = rng() * Math.PI * 2;
+    const r = 500 + rng() * 400;
+    const y = 120 + rng() * 320;
+    positions[i * 3] = Math.cos(a) * r;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = Math.sin(a) * r;
   }
-  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
-  const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const stars = new THREE.Points(geo, new THREE.PointsMaterial({
     color: 0xffffff, size: 1.6, transparent: true, opacity: 0.55,
     sizeAttenuation: false, depthWrite: false,
   }));
-  scene.add(stars);
+  ctx.scene.add(stars);
+  ctx.stars = stars;
+}
 
-  // Ground: one big asphalt slab, then road strips, then sidewalks.
-  const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(CFG.cityHalf * 2 + 160, CFG.cityHalf * 2 + 160),
-    lambert(0x1c1c22),
-  );
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.set(0, -0.05, 0);
-  group.add(ground);
-
+function addGround(ctx) {
+  const span = 2 * CFG.cityHalf + 160;
+  const ground = flat(new THREE.PlaneGeometry(span, span), lambert(0x1c1c22), 0, -0.05, 0);
+  ctx.group.add(ground);
   const roadMat = lambert(CFG.asphalt);
-  for (const x of roadXs) {
-    const strip = new THREE.Mesh(new THREE.PlaneGeometry(CFG.roadWidth, CFG.cityHalf * 2 + 40), roadMat);
-    strip.rotation.x = -Math.PI / 2;
-    strip.position.set(x, 0, 0);
-    group.add(strip);
+  const long = 2 * CFG.cityHalf + 40;
+  for (const x of ctx.roadXs) {
+    ctx.group.add(flat(new THREE.PlaneGeometry(CFG.roadWidth, long), roadMat, x, 0, 0));
   }
-  for (const z of roadZs) {
-    const strip = new THREE.Mesh(new THREE.PlaneGeometry(CFG.cityHalf * 2 + 40, CFG.roadWidth), roadMat);
-    strip.rotation.x = -Math.PI / 2;
-    strip.position.set(0, 0.01, z);
-    group.add(strip);
+  for (const z of ctx.roadZs) {
+    ctx.group.add(flat(new THREE.PlaneGeometry(long, CFG.roadWidth), roadMat, 0, 0.01, z));
   }
+}
 
+function addDashes(ctx) {
   // Road dashes, one InstancedMesh for both directions: ~800 meshes
   // become a single draw call. Matrices are collected first, then baked.
-  const dashGeo = new THREE.PlaneGeometry(0.5, 4);
-  const dashMat = lambert(0xd8d8c8);
-  const dashMats4 = [];
-  const dummy = new THREE.Object3D();
-  for (const x of roadXs) {
-    for (let z = -CFG.cityHalf; z <= CFG.cityHalf; z += 10) {
+  const geo = new THREE.PlaneGeometry(0.5, 4);
+  const mat = lambert(0xd8d8c8);
+  const matrices = [];
+  const dummy = ctx.dummy;
+  const step = 10;
+  for (const x of ctx.roadXs) {
+    for (let z = -CFG.cityHalf; z <= CFG.cityHalf; z += step) {
       dummy.position.set(x, 0.02, z);
       dummy.rotation.set(-Math.PI / 2, 0, 0);
       dummy.updateMatrix();
-      dashMats4.push(dummy.matrix.clone());
+      matrices.push(dummy.matrix.clone());
     }
   }
-  for (const z of roadZs) {
-    for (let x = -CFG.cityHalf; x <= CFG.cityHalf; x += 10) {
+  for (const z of ctx.roadZs) {
+    for (let x = -CFG.cityHalf; x <= CFG.cityHalf; x += step) {
       dummy.position.set(x, 0.03, z);
       dummy.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
       dummy.updateMatrix();
-      dashMats4.push(dummy.matrix.clone());
+      matrices.push(dummy.matrix.clone());
     }
   }
-  const dashes = new THREE.InstancedMesh(dashGeo, dashMat, dashMats4.length);
-  dashMats4.forEach((m, i) => dashes.setMatrixAt(i, m));
-  dashes.instanceMatrix.needsUpdate = true;
-  group.add(dashes);
+  bakeInstanced(ctx, geo, mat, matrices);
+}
 
-  // Buildings, one or two per block, with window textures. Neon signs
-  // hang on the street-facing side of about a third of them.
+function addTowers(ctx) {
+  const { rng } = ctx;
   const texCache = new Map();
-  function texFor(color) {
-    if (!texCache.has(color)) texCache.set(color, windowTexture(color, 0.42, mulberry32(color + seed)));
+  const texFor = (color) => {
+    if (!texCache.has(color)) texCache.set(color, litWindowsTexture(color, 0.42, mulberry32(color + ctx.seed)));
     return texCache.get(color);
-  }
-  const signTexs = NEON_WORDS.map((w, i) => neonSignTexture(w, '#' + PALETTE.neonSign[i % PALETTE.neonSign.length].toString(16).padStart(6, '0'), rng));
+  };
+  const signTexs = NEON_WORDS.map((w, i) => neonWordTexture(w, '#' + PALETTE.neonSign[i % PALETTE.neonSign.length].toString(16).padStart(6, '0')));
   const signGeo = new THREE.PlaneGeometry(9, 2.2);
   const signMats = signTexs.map((t) => new THREE.MeshBasicMaterial({ map: t, transparent: true, side: THREE.DoubleSide }));
   const roofMat = lambert(0x241d2e);
   const plazas = [];
-  for (let bi = -CFG.gridHalf; bi < CFG.gridHalf; bi++) {
-    for (let bj = -CFG.gridHalf; bj < CFG.gridHalf; bj++) {
+  const half = CFG.gridHalf;
+  for (let bi = -half; bi < half; bi++) {
+    for (let bj = -half; bj < half; bj++) {
       const cx = bi * CFG.pitch + CFG.pitch / 2;
       const cz = bj * CFG.pitch + CFG.pitch / 2;
       // Beachfront row stays open: sand, palms and umbrellas instead.
       if (cz > CFG.beachZ - 30) continue;
       // Some blocks are plazas with trees instead of buildings.
       if (rng() < 0.14) {
-        const plaza = new THREE.Mesh(new THREE.PlaneGeometry(CFG.blockSize, CFG.blockSize), lambert(CFG.sidewalk));
-        plaza.rotation.x = -Math.PI / 2;
-        plaza.position.set(cx, 0.04, cz);
-        group.add(plaza);
+        const plaza = flat(new THREE.PlaneGeometry(CFG.blockSize, CFG.blockSize), lambert(CFG.sidewalk), cx, 0.04, cz);
+        ctx.group.add(plaza);
         plazas.push({ x: cx, z: cz });
         continue;
       }
@@ -236,11 +242,11 @@ export function buildCity(scene, seed) {
         const mat = new THREE.MeshLambertMaterial({ map: texFor(color) });
         const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
         b.position.set(bx, h / 2, bz);
-        group.add(b);
+        ctx.group.add(b);
         const roof = new THREE.Mesh(new THREE.BoxGeometry(w * 0.4, 1.2, d * 0.4), roofMat);
         roof.position.set(bx + range(rng, -2, 2), h + 0.6, bz + range(rng, -2, 2));
-        group.add(roof);
-        colliders.push({
+        ctx.group.add(roof);
+        ctx.colliders.push({
           minX: bx - w / 2 - 0.4, maxX: bx + w / 2 + 0.4,
           minZ: bz - d / 2 - 0.4, maxZ: bz + d / 2 + 0.4,
         });
@@ -259,103 +265,122 @@ export function buildCity(scene, seed) {
             sign.position.set(bx, sy, faceZ);
             sign.rotation.y = faceZ > bz ? 0 : Math.PI;
           }
-          group.add(sign);
+          ctx.group.add(sign);
         }
       }
     }
   }
+  ctx.plazas = plazas;
+}
 
+function addFlora(ctx) {
   // Palms and lamps along the roads, all instanced: trunks, leaves, poles
   // and bulbs are four InstancedMeshes instead of hundreds of groups.
+  const { rng, dummy } = ctx;
   const palmSpots = [];
   const lampSpots = [];
-  for (const x of roadXs) {
+  const edge = CFG.roadWidth / 2;
+  for (const x of ctx.roadXs) {
     for (let z = -CFG.cityHalf + 25; z <= CFG.cityHalf - 25; z += 50) {
       if (rng() < 0.55) {
-        palmSpots.push({ x: x + CFG.roadWidth / 2 + 2.5, z: z + range(rng, -6, 6), tilt: range(rng, -0.08, 0.08) });
-        colliders.push({ minX: x + CFG.roadWidth / 2 + 1.6, maxX: x + CFG.roadWidth / 2 + 3.4, minZ: z - 1, maxZ: z + 1 });
+        palmSpots.push({ x: x + edge + 2.5, z: z + range(rng, -6, 6), tilt: range(rng, -0.08, 0.08) });
+        ctx.colliders.push({ minX: x + edge + 1.6, maxX: x + edge + 3.4, minZ: z - 1, maxZ: z + 1 });
       }
       if (rng() < 0.5) {
-        lampSpots.push({ x: x - CFG.roadWidth / 2 - 2, z: z + 12 });
+        lampSpots.push({ x: x - edge - 2, z: z + 12 });
       }
     }
   }
-  // Plaza palms, on the plazas the building loop actually picked (no
+  // Plaza palms, on the plazas the tower loop actually picked (no
   // second coin flip: the first loop's RNG sequence already decided).
-  for (const pl of plazas) {
+  for (const pl of ctx.plazas) {
     for (let t = 0; t < 3; t++) {
       palmSpots.push({ x: pl.x + range(rng, -12, 12), z: pl.z + range(rng, -12, 12), tilt: range(rng, -0.08, 0.08) });
     }
   }
-  const trunkGeo = new THREE.CylinderGeometry(0.25, 0.45, 6, 6);
-  const trunks = new THREE.InstancedMesh(trunkGeo, lambert(PALETTE.palmTrunk), palmSpots.length);
-  const leafGeo = new THREE.ConeGeometry(0.7, 3.4, 4);
-  const leaves = new THREE.InstancedMesh(leafGeo, lambert(PALETTE.palmLeaf), palmSpots.length * 5);
+  const trunkMats = [];
+  const leafMats = [];
   palmSpots.forEach((p, i) => {
     dummy.position.set(p.x, 3, p.z);
     dummy.rotation.set(0, 0, p.tilt);
     dummy.updateMatrix();
-    trunks.setMatrixAt(i, dummy.matrix);
+    trunkMats.push(dummy.matrix.clone());
     for (let k = 0; k < 5; k++) {
       const a = (k / 5) * Math.PI * 2;
       dummy.position.set(p.x + Math.cos(a) * 1.4, 6.4, p.z + Math.sin(a) * 1.4);
       dummy.rotation.set(-Math.sin(a) * 1.1, 0, Math.cos(a) * 1.1);
       dummy.updateMatrix();
-      leaves.setMatrixAt(i * 5 + k, dummy.matrix);
+      leafMats.push(dummy.matrix.clone());
     }
   });
-  trunks.instanceMatrix.needsUpdate = true;
-  leaves.instanceMatrix.needsUpdate = true;
-  group.add(trunks);
-  group.add(leaves);
-  const poleGeo = new THREE.CylinderGeometry(0.12, 0.16, 6.5, 6);
-  const poles = new THREE.InstancedMesh(poleGeo, lambert(PALETTE.lamp), lampSpots.length);
-  const bulbGeo = new THREE.SphereGeometry(0.35, 8, 6);
-  const bulbs = new THREE.InstancedMesh(bulbGeo, new THREE.MeshLambertMaterial({ color: 0xffe9a8, emissive: 0xffdf80 }), lampSpots.length);
-  lampSpots.forEach((p, i) => {
+  bakeInstanced(ctx, new THREE.CylinderGeometry(0.25, 0.45, 6, 6), lambert(PALETTE.palmTrunk), trunkMats);
+  bakeInstanced(ctx, new THREE.ConeGeometry(0.7, 3.4, 4), lambert(PALETTE.palmLeaf), leafMats);
+  const poleMats = [];
+  const bulbMats = [];
+  lampSpots.forEach((p) => {
     dummy.position.set(p.x, 3.25, p.z);
     dummy.rotation.set(0, 0, 0);
     dummy.updateMatrix();
-    poles.setMatrixAt(i, dummy.matrix);
+    poleMats.push(dummy.matrix.clone());
     dummy.position.set(p.x, 6.6, p.z);
     dummy.updateMatrix();
-    bulbs.setMatrixAt(i, dummy.matrix);
+    bulbMats.push(dummy.matrix.clone());
   });
-  poles.instanceMatrix.needsUpdate = true;
-  bulbs.instanceMatrix.needsUpdate = true;
-  group.add(poles);
-  group.add(bulbs);
+  bakeInstanced(ctx, new THREE.CylinderGeometry(0.12, 0.16, 6.5, 6), lambert(PALETTE.lamp), poleMats);
+  bakeInstanced(ctx, new THREE.SphereGeometry(0.35, 8, 6), new THREE.MeshLambertMaterial({ color: 0xffe9a8, emissive: 0xffdf80 }), bulbMats);
+}
 
-  // Beach and sea on the south edge.
-  const sand = new THREE.Mesh(new THREE.PlaneGeometry(CFG.cityHalf * 2 + 160, 60), lambert(CFG.sand));
-  sand.rotation.x = -Math.PI / 2;
-  sand.position.set(0, 0.06, CFG.beachZ + 18);
-  group.add(sand);
-  const sea = new THREE.Mesh(new THREE.PlaneGeometry(CFG.cityHalf * 2 + 400, 200), new THREE.MeshLambertMaterial({ color: CFG.sea }));
-  sea.rotation.x = -Math.PI / 2;
-  sea.position.set(0, 0.02, CFG.seaZ + 80);
-  group.add(sea);
+function addBeach(ctx) {
+  const { rng } = ctx;
+  const sand = flat(new THREE.PlaneGeometry(2 * CFG.cityHalf + 160, 60), lambert(CFG.sand), 0, 0.06, CFG.beachZ + 18);
+  ctx.group.add(sand);
+  const sea = flat(new THREE.PlaneGeometry(2 * CFG.cityHalf + 400, 200), new THREE.MeshLambertMaterial({ color: CFG.sea }), 0, 0.02, CFG.seaZ + 80);
+  ctx.group.add(sea);
   // Beach umbrellas.
   for (let i = 0; i < 8; i++) {
     const ux = -180 + i * 52 + range(rng, -8, 8);
     const uz = CFG.beachZ + range(rng, 8, 30);
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 3, 6), lambert(0xdddddd));
     pole.position.set(ux, 1.5, uz);
-    group.add(pole);
+    ctx.group.add(pole);
     const top = new THREE.Mesh(new THREE.ConeGeometry(2.6, 1.1, 8), lambert(pick(rng, [0xff2e88, 0x22d3ee, 0xffe66d, 0xff6b35])));
     top.position.set(ux, 3.4, uz);
-    group.add(top);
+    ctx.group.add(top);
   }
+}
 
+export function buildCity(scene, seed) {
+  const rng = mulberry32(seed);
+  const group = new THREE.Group();
+  const colliders = [];
+  const roadXs = [];
+  const roadZs = [];
+  for (let i = -CFG.gridHalf; i <= CFG.gridHalf; i++) {
+    roadXs.push(i * CFG.pitch);
+    roadZs.push(i * CFG.pitch);
+  }
+  const ctx = {
+    scene, seed, rng, group, colliders, roadXs, roadZs,
+    dummy: new THREE.Object3D(),
+    plazas: [],
+    sun: null, hemi: null, stars: null,
+  };
+  addSky(ctx);
+  addStars(ctx);
+  addGround(ctx);
+  addDashes(ctx);
+  addTowers(ctx);
+  addFlora(ctx);
+  addBeach(ctx);
   scene.add(group);
   return {
     group,
     colliders,
     roadXs,
     roadZs,
-    sun,
-    hemi,
-    stars,
+    sun: ctx.sun,
+    hemi: ctx.hemi,
+    stars: ctx.stars,
     garage: { x: -25, z: -175 },
     safehouse: { x: 175, z: 175 },
     hospital: { x: -175, z: 25 },
